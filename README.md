@@ -8,10 +8,10 @@ A DIY electronic coil winder built using:
  - SSD1306 OLED display
 
 Required Arduino libraries:
- - Adafruit BusIO library, version 1.7.2 or later
- - Adafruit GFX library, version 1.10.6 or later
- - Adafruit SSD1306, Version 2.4.3 or later
- - StepperDriver, version 1.3.1 (by Laurentiu Badea)
+ - Adafruit BusIO library, version 1.15.0 or later
+ - Adafruit GFX library, version 1.11.9 or later
+ - Adafruit SSD1306, Version 2.5.9 or later
+ - StepperDriver, version 1.4.1 (by Laurentiu Badea)
  - Customized AsyncServoLib - from the libraries directory in this repository
 
 See the documentation folder for a bill of materials and photos of a constructed winder.
