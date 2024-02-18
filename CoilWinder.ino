@@ -16,6 +16,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
+#define	VERSION	"v1.1"
+
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 32 // OLED display height, in pixels
 
@@ -39,12 +41,11 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define MICROSTEPS 1
 // was 16
 
-//#define DIR 2
-//#define STEP 3
+// Output pins for stepper motor control (STEP and DIR)
 #define DIR 6
 #define STEP 7
-#define SLEEP 4 // optional (just delete SLEEP from everywhere if not used)
 
+// Input pins for rotary encoder CLK and DT
 #define RE_CLK  2
 #define RE_DT  3
 
@@ -61,31 +62,46 @@ String currentDir = "";
 A4988 stepper(MOTOR_STEPS, DIR, STEP ); //, SLEEP, MS1, MS2, MS3);
 
 AsyncServo asyncServo;
+/* 
+  Constants defining the input range for the guiding eye servo position.
+  These are the ranges of the sweep_left and sweep_right values in the coilProgram array.
+  They will be normalized to actual servo pulse width values in us by the AsyncServoLib library
+*/
+#define MIN_SWEEP 0
+#define MID_SWEEP 700
+#define MAX_SWEEP 1400
+/*
+  Constants defining the actual pulse width in us that your servo will tolerate 
+  as the minimum (left) position, middle, and maximum (right) position.
+*/
+#define MIN_SERVO 800
+#define MID_SERVO 1500
+#define MAX_SERVO 2200
 
 typedef struct
 {
-  const char *description;
-  unsigned  spindle_rpm;
-  unsigned  sweep_time;
-  unsigned  num_winds;
-  unsigned  sweep_left;
-  unsigned  sweep_right;
+  const char *description;  // Text shown on display
+  unsigned  spindle_rpm;    // RPM of spindle
+  unsigned  sweep_time;     // Time in ms to sweep the guiding eye servo from the left to the right extents
+  unsigned  num_winds;      // Total number of winds in the coil
+  unsigned  sweep_left;     // Servo pulse width in us of the left extent of the guiding eye servo
+  unsigned  sweep_right;    // Servo pulse width in us of the right extent of the guiding eye servo
 } COIL;
 
 #define NUM_PROG  12
-COIL coilArray[NUM_PROG] = {
-  {"50 AWG\n3x2 75ohm", 250, 19200, 260, 1415, 1595 },
-  {"50 AWG\n3x2 150ohm", 250, 19200, 520, 1415, 1595 },
-  {"44.5 AWG\n3x3 50ohm", 480, 7911, 396, 1450, 1800},
-  {"42.5 AWG\n3x3 40ohm", 480, 6270, 544, 1520, 1870},
-  {"44 AWG\n3x3 150ohm", 100, 13326, 1338, 1415, 1595},
-  {"48 AWG\n3x2 75 ohm", 80, 13326, 328, 1415, 1595},
-  {"48 AWG\n3x3 150ohm", 80, 13326, 645, 1415, 1595},
-  {"48 AWG\n2.4x2 75ohm", 80, 13326, 397, 1420, 1600 },
-  {"42.5 AWG\nSpool", 480, 6270, 10000, 1450, 1800 },
-  {"44 AWG\nSpool", 400, 18459, 10000, 1450, 1800 }, //7911
-  {"49 AWG\nSpool", 60, 13326, 10000, 1450, 1800},
-  {"Calibrate\nSweep", 480, 5000, 10000, 1400, 1600 }
+COIL coilPrograms[NUM_PROG] = {
+  {"Calibrate\nSweep", 480, 5000, 10000, MID_SWEEP, MID_SWEEP }, // 1400, 1600
+  {"50 AWG\n3x2 75ohm", 250, 19200, 260, 610, 790 },
+  {"50 AWG\n3x2 150ohm", 250, 19200, 520, 610, 790 },
+  {"44.5 AWG\n3x3 50ohm", 480, 7911, 396, 525, 875},
+  {"42.5 AWG\n3x3 40ohm", 480, 6270, 544, 525, 875},
+  {"44 AWG\n3x3 150ohm", 100, 13326, 1338, 610, 790},
+  {"48 AWG\n3x2 75 ohm", 80, 13326, 328, 610, 790},
+  {"48 AWG\n3x3 150ohm", 80, 13326, 645, 610, 790},
+  {"48 AWG\n2.4x2 75ohm", 80, 13326, 397, 610, 790 },
+  {"42.5 AWG\nSpool", 480, 6270, 10000, 525, 875 },
+  {"44 AWG\nSpool", 400, 18459, 10000, 525, 875 }, //7911
+  {"49 AWG\nSpool", 60, 13326, 10000, 525, 875}
 };
 
 typedef enum { SELECT_MODE, WIND_MODE, CALIBRATE_MODE, PAUSED_MODE } MODE;
@@ -110,7 +126,11 @@ const MENU pauseMenu[NUM_PAUSED_MENU] = {
 STATE state = STARTING;
 MODE mode = SELECT_MODE;
 
-unsigned program = 0;     // Which program is selected
+
+
+unsigned calibrate_position = MID_SWEEP;
+
+unsigned program = 1;     // Which program is selected
 unsigned menu_item = 0;   // Which menu item is selected (for paused menu)
 unsigned wind_count = 0;
 unsigned layer_count = 0;
@@ -119,14 +139,11 @@ boolean isPaused = false;
 void setup() {
   unsigned button_press = 0;
 
-  // Setup Stepper
-    // if using enable/disable on ENABLE pin (active LOW) instead of SLEEP uncomment next line
+  // Setup Stepper motor driver
   stepper.setEnableActiveState(LOW);
   stepper.disable();
   stepper.setSpeedProfile( stepper.CONSTANT_SPEED, 1, 1 ) ;
-  stepper.begin(coilArray[program].spindle_rpm, MICROSTEPS);
-
-
+  stepper.begin(coilPrograms[program].spindle_rpm, MICROSTEPS);
   
   Serial.begin(115200);
   Serial.println("RESET");
@@ -141,9 +158,7 @@ void setup() {
   display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
-  display.println(F("CoilWinder v1.0"));
-  // Show initial display buffer contents on the screen --
-  // the library initializes this with an Adafruit splash screen.
+  display.println("CoilWinder"); display.println(VERSION);
   display.display();
 
   // Setup rotary encoder
@@ -155,29 +170,22 @@ void setup() {
   attachInterrupt(1, updateEncoder, CHANGE );
 
   // Setup servo
-  asyncServo.SetOutput(800, 1500, 2200);
-  asyncServo.write(coilArray[program].sweep_left);
+  // The asyncServoLib normalizes the input position to an actual set of pulse widths.
+  asyncServo.SetInput( MIN_SWEEP, MID_SWEEP, MAX_SWEEP);     // Max Left, center, and max right extents in coilPrograms
+  asyncServo.SetOutput(MIN_SERVO, MID_SERVO, MAX_SERVO);     // Actual left, center, and right pulse widths in us that are sent to servo
+  asyncServo.write(coilPrograms[program].sweep_left);
   asyncServo.Attach(SERVO_PIN);
   delay(2000);
-  asyncServo.Detach();
+  //asyncServo.Detach();
 
+  // Initialize the state machine
   mode = SELECT_MODE;
   state = STARTING;
-  //for ( int i = 0; i < 1000; ++i )
-  //{
-  //  if ( digitalRead( BUTTON_PIN ) == LOW )
-   // {
-   //    ++button_press;
-   // }
-   // delay(1);
-  //}
-  //if ( button_press > 500 )
-  //{
-  //  mode = CALIBRATE;
-  //  state = STARTING;
-  //}
 }
 
+/*
+  Interrupt routine that handles rotation of the rotary encoder
+*/
 void updateEncoder() {
   // Read the current state of RE_CLK
   currentStateCLK = digitalRead(RE_CLK);
@@ -219,6 +227,23 @@ void updateEncoder() {
             program = 0;
           }
         }
+        case CALIBRATE_MODE:
+        // If the DT state is the same as the CLK state then
+        // the encoder is rotating CCW so decrement
+        if (digitalRead(RE_DT) == currentStateCLK) {
+          if ( calibrate_position == 0 ) {
+            calibrate_position = MAX_SWEEP;
+          }
+          else {
+            calibrate_position --;
+          }
+        } else {
+        // Encoder is rotating CW so increment
+          calibrate_position ++;
+          if ( calibrate_position >= MAX_SWEEP ) {
+            calibrate_position = 0;
+          }
+        }
         break;
     }
   }
@@ -227,28 +252,42 @@ void updateEncoder() {
   lastStateCLK = currentStateCLK;
 }
 
+/*
+  This routine is called by the AsyncServoLib when the guiding eye hits the left extent.  It tells the asyncServo object
+  to start moving towards the right extent
+*/
 void guidingEye_at_left()
 {
   //Serial.print("Left: " );
   //Serial.println(layer_count);
   layer_count++;
-  asyncServo.Move(coilArray[program].sweep_right, coilArray[program].sweep_time, guidingEye_at_right );
+  asyncServo.Move(coilPrograms[program].sweep_right, coilPrograms[program].sweep_time, guidingEye_at_right );
 
 }
 
+/*
+  This routine is called by the AsyncServoLib when the guding eye hits the right extent.  It tells the asyncServo object
+  to start moving towards the left extent
+*/
 void guidingEye_at_right()
 {
   //Serial.println("Right");
   layer_count++;
-  asyncServo.Move(coilArray[program].sweep_left, coilArray[program].sweep_time, guidingEye_at_left );
+  asyncServo.Move(coilPrograms[program].sweep_left, coilPrograms[program].sweep_time, guidingEye_at_left );
 }
 
 boolean buttonActive = false;
-boolean longPressActive = false;
-long buttonTimer = 0;
-#define LONG_PRESS  2000
-unsigned long abort_time_millis = 0;
 
+
+/*
+  Wind mode processing loop.  This loop is a state machine that handles different states during a coil wind, including
+  when the winding has been paused.
+
+  It handles display updates, checking for button presses, turning the stepper motor on or off, 
+  and turning the guiding eye servo on or off.
+
+  Transitions to PAUSE_MODE when the button is pressed, or SELECT_MODE when the coil wind is done
+*/
 void wind_loop() {
   unsigned wait_time_micros;
 
@@ -265,97 +304,9 @@ void wind_loop() {
       //GOTO PAUSE MENU
     }
   }
-/*  STATE old_state = state;
-/*
-  //Serial.println( state );
-  if ( state == ABORTING )
-  {
-    //Serial.print("Diff: ");
-    //Serial.println(millis() - abort_time_millis );
-    if ( ( millis()  - abort_time_millis ) > 10000 ) {
-      state = RUNNING;
-    }
-  }
 
-  if ( digitalRead( BUTTON_PIN ) == LOW ) {
-    if ( buttonActive == false ) {
-      buttonActive = true;
-      Serial.println( "Button Low");
-      buttonTimer = millis();
-    }
-    if ( (millis() - buttonTimer > LONG_PRESS) && ( longPressActive == false )) {
-      longPressActive = true;
-      //if ( state == PROG_SEL ) {
-      //  state = STARTING;
-      //}
-      //else
-      if ( state == RUNNING) {
-        state = ABORTING;
-      }
-      else if ( state == ABORTING ) {
-        state = DONE;
-      }
-    }
-  }
-  else {
-    if ( buttonActive == true ) {
-      if ( longPressActive == true ) {
-        longPressActive = false;
-        Serial.println("Long off");
-      }
-      else {
-        Serial.print("State: " );
-        Serial.println( state );
-        switch ( state ) {
-          //case PROG_SEL:
-          //  ++program;
-          //  if ( program >= NUM_PROG ) {
-          //    program = 0;
-          //  }
-          //  Serial.println( "Next prog" );
-          //  break;
-          case RUNNING:
-            state = PAUSED;
-            Serial.println("Pausing");
-            break;
-          case PAUSED:
-            state = RUNNING;
-            Serial.println("Unpausing");
-            break;
-        }
-      }
-      buttonActive = false;
-    }
-  }
-*/
   switch ( state ) {
-    //case PROG_SEL:
-    //  display.clearDisplay();
-    //  display.setCursor(0, 0);
-    //  display.println(coilArray[program].description);
-    //  display.display();
-    //  break;
-    /*
-    case ABORTING:
-      if ( !isPaused ) {
-        asyncServo.Pause();
-        abort_time_millis = millis();
-        //    Serial.print("Abort time ");
-        //    Serial.println(abort_time_millis);
-      }
-      display.clearDisplay();
-      display.setCursor(0, 0);
-      display.print("Hold to\nabort -");
-      display.println(wind_count);
-      display.display();
-      //Serial.println( millis() );
-
-      break;
-      */
     case PAUSED:
-      //if ( old_state == RUNNING ) {
-      //  asyncServo.Pause();
-      //}
       isPaused = true;
       mode = PAUSED_MODE;
       display.clearDisplay();
@@ -365,25 +316,26 @@ void wind_loop() {
       display.display();
       break;
     case SHIFT_LEFT:
-      coilArray[program].sweep_left -= 5;
-      coilArray[program].sweep_right -= 5;
+      coilPrograms[program].sweep_left -= 5;
+      coilPrograms[program].sweep_right -= 5;
       state = RUNNING;
       break;
     case SHIFT_RIGHT:
-      coilArray[program].sweep_left += 5;
-      coilArray[program].sweep_right +=5 ;
+      coilPrograms[program].sweep_left += 5;
+      coilPrograms[program].sweep_right +=5 ;
       state = RUNNING;
       break;
     case STARTING:
-      wind_count = coilArray[program].num_winds;
+      wind_count = coilPrograms[program].num_winds;
       display.clearDisplay();
       display.setCursor(0, 0);
       display.println("Starting");
       display.println(wind_count);
       display.display();
       Serial.println("START");
+      asyncServo.write(coilPrograms[program].sweep_left);
       asyncServo.Attach(SERVO_PIN);
-      stepper.begin(coilArray[program].spindle_rpm, MICROSTEPS);
+      stepper.begin(coilPrograms[program].spindle_rpm, MICROSTEPS);
       stepper.enable();
       guidingEye_at_left();
       stepper.startRotate(360);
@@ -420,7 +372,7 @@ void wind_loop() {
     case DONE:
       stepper.disable();
       asyncServo.Stop();
-      asyncServo.write( 1500 );
+      asyncServo.write( coilPrograms[program].sweep_left );
       Serial.println("Done");
       display.clearDisplay();
       display.setCursor(0, 0);
@@ -431,14 +383,35 @@ void wind_loop() {
       mode = SELECT_MODE;
       asyncServo.Detach();
       buttonActive = false;
-      longPressActive = false;
       break;
   }
 }
 
+/*
+  Calibrate mode processing loop.  This mode is used to determine the exact values for the left and right extents of the
+  guiding eye to be used as the 'sweep_left' and 'sweep_right' values in the coilPrograms coil program.
+
+  The value on the display is the current servo position in microseconds.
+
+  Clicking the button will stop calibration mode and go back to the main menu.
+*/
 void calibrate_loop()
 {
   unsigned wait_time_micros = 0;
+
+  if ( digitalRead( BUTTON_PIN ) == LOW ) {
+     buttonActive = true;
+  }
+  else {
+    if ( buttonActive ) {
+      asyncServo.Pause();
+      mode = WIND_MODE;
+      state = DONE;
+      buttonActive = false;
+      return;
+      //GOTO WIND_MODE and stop the program
+    }
+  }
   switch ( state )
   {
     case STARTING:
@@ -448,19 +421,20 @@ void calibrate_loop()
       display.display();
       Serial.println("START Calibrate");
       delay(1000);
+      asyncServo.write(0);
       asyncServo.Attach(SERVO_PIN);
-      stepper.begin(coilArray[program].spindle_rpm, MICROSTEPS);
-      stepper.enable();
-      guidingEye_at_left();
-      stepper.startRotate(360);
+      //stepper.begin(coilPrograms[program].spindle_rpm, MICROSTEPS);
+      //stepper.enable();
+      //guidingEye_at_left();
+      //stepper.startRotate(360);
       state = RUNNING;
       break;
     case RUNNING:
-      wait_time_micros = stepper.nextAction();
-      if (wait_time_micros <= 0) {
-        stepper.startRotate( 360 );
-
-      }
+      //wait_time_micros = stepper.nextAction();
+      //if (wait_time_micros <= 0) {
+      //  stepper.startRotate( 360 );
+      //}
+      asyncServo.write( calibrate_position );
       display.clearDisplay();
       display.setCursor(0, 0);
       display.println(asyncServo.GetCurrentPosition());
@@ -468,11 +442,17 @@ void calibrate_loop()
       //if ( old_state == PAUSED || old_state == ABORTING ) {
       //  asyncServo.Resume();
       //}
-      asyncServo.Update();
+      //asyncServo.Update();
       break;
   }
 }
 
+/*
+  Main menu processing loop.  Scroll through the programs with the knob, and listen for button press events
+  to select the program and start a wind, or to enter calibration mode to get the values for the guiding eye extents
+
+  Transitions to either WIND_MODE for a coil wind for CALIBRATE_MODE to calibrate the guiding eye extents
+*/
 void select_loop()
 {
     if ( digitalRead( BUTTON_PIN ) == LOW ) {
@@ -497,10 +477,18 @@ void select_loop()
     }
     display.clearDisplay();
     display.setCursor(0, 0);
-    display.println(coilArray[program].description);
+    display.println(coilPrograms[program].description);
+    asyncServo.write(coilPrograms[program].sweep_left);
     display.display();
 }
 
+/*
+  Puased menu processing.  Scroll through the paused menu options, and check for button presses.
+  The paused menu is invoked when you click the button during a winding program, and lets you either abort the
+  wind, or slide the guiding eye extents left or right if your widing form is not correctly aligned to the guiding eye.
+
+  Transitions back to WIND_MODE after a button click.
+*/
 void paused_loop()
 {
     if ( digitalRead( BUTTON_PIN ) == LOW ) {
@@ -529,15 +517,19 @@ void loop()
 {
   switch ( mode )
   {
+    // Mode when selecting the program
     case SELECT_MODE:
       select_loop();
       break;
+    // Mode when paused during a program (invoked by clicking the button)
     case PAUSED_MODE:
       paused_loop();
       break;
+    // Mode when a coil is being wound
     case WIND_MODE:
       wind_loop();
       break;
+    // Mode used by program 0 to calibrate the guiding eye sweep extents
     case CALIBRATE_MODE:
       calibrate_loop();
       break;
