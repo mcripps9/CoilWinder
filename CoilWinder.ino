@@ -1,7 +1,7 @@
 /*
    Simple stepper motor based coil winder
 
-   Copyright (C)2021, Michael Cripps
+   Copyright (C)2021-2024, Michael Cripps
 
    This file may be redistributed under the terms of the Apache 2.0 license.
    A copy of this license has been included with this distribution in the file LICENSE.
@@ -10,13 +10,15 @@
 
 */
 #include <Arduino.h>
-#include <AsyncServoLib.h>
 #include <SPI.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <EEPROM.h>
+#include <SSD1306Ascii.h>
+#include <SSD1306AsciiWire.h>
+#include <Servo.h>
+#include "Types.h"
 
-#define	VERSION	"v1.1"
+#define	VERSION	"v2.0-rc1"
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 32 // OLED display height, in pixels
@@ -28,18 +30,21 @@
 // On an arduino LEONARDO:   2(SDA),  3(SCL), ...
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
 #define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+SSD1306AsciiWire display;
+#define LINE_1_Y  0
+#define LINE_2_Y  32
 
 // Output pin for servo
 #define SERVO_PIN 9
 // this pin should connect to Ground for a button press
 #define BUTTON_PIN 13
+#define FOOTSW_PIN  12
 
-// Motor steps per revolution. Most steppers are 200 steps or 1.8 degrees/step
-#define MOTOR_STEPS 24
-// Microstepping mode. If you hardwired it to save pins, set to the same value here.
+// Default motor steps per revolution. Use 24 for 15 deg/step, 48 for 75 deg/step, or 200 for 18 deg/step
+// The EEPROM will be initialized with this value, but can be changed later with the user interface
+#define DEFAULT_MOTOR_STEPS 48
+// Microstepping mode.  There is no value to microstepping for the winder, so we default it to off
 #define MICROSTEPS 1
-// was 16
 
 // Output pins for stepper motor control (STEP and DIR)
 #define DIR 6
@@ -47,237 +52,238 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Input pins for rotary encoder CLK and DT
 #define RE_CLK  2
-#define RE_DT  3
+#define RE_DATA 3
 
-int counter = 0;
-int currentStateCLK;
-int lastStateCLK;
-String currentDir = "";
+#include "DRV8834.h"
+#define STEPPER_DRIVER  DRV8834
+//#include "A4988.h"
+//#define STEPPER_DRIVER  A4988
 
-// DRV8834 board mimics the A4988
-#include "A4988.h"
-#define MS1 10
-#define MS2 11
-#define MS3 12
-A4988 stepper(MOTOR_STEPS, DIR, STEP ); //, SLEEP, MS1, MS2, MS3);
+Servo servo;
 
-AsyncServo asyncServo;
-/* 
-  Constants defining the input range for the guiding eye servo position.
-  These are the ranges of the sweep_left and sweep_right values in the coilProgram array.
-  They will be normalized to actual servo pulse width values in us by the AsyncServoLib library
-*/
-#define MIN_SWEEP 0
-#define MID_SWEEP 700
-#define MAX_SWEEP 1400
-/*
-  Constants defining the actual pulse width in us that your servo will tolerate 
-  as the minimum (left) position, middle, and maximum (right) position.
-*/
-#define MIN_SERVO 800
-#define MID_SERVO 1500
-#define MAX_SERVO 2200
-
-typedef struct
-{
-  const char *description;  // Text shown on display
-  unsigned  spindle_rpm;    // RPM of spindle
-  unsigned  sweep_time;     // Time in ms to sweep the guiding eye servo from the left to the right extents
-  unsigned  num_winds;      // Total number of winds in the coil
-  unsigned  sweep_left;     // Servo pulse width in us of the left extent of the guiding eye servo
-  unsigned  sweep_right;    // Servo pulse width in us of the right extent of the guiding eye servo
-} COIL;
-
-#define NUM_PROG  12
-COIL coilPrograms[NUM_PROG] = {
-  {"Calibrate\nSweep", 480, 5000, 10000, MID_SWEEP, MID_SWEEP }, // 1400, 1600
-  {"50 AWG\n3x2 75ohm", 250, 19200, 260, 610, 790 },
-  {"50 AWG\n3x2 150ohm", 250, 19200, 520, 610, 790 },
-  {"44.5 AWG\n3x3 50ohm", 480, 7911, 396, 525, 875},
-  {"42.5 AWG\n3x3 40ohm", 480, 6270, 544, 525, 875},
-  {"44 AWG\n3x3 150ohm", 100, 13326, 1338, 610, 790},
-  {"48 AWG\n3x2 75 ohm", 80, 13326, 328, 610, 790},
-  {"48 AWG\n3x3 150ohm", 80, 13326, 645, 610, 790},
-  {"48 AWG\n2.4x2 75ohm", 80, 13326, 397, 610, 790 },
-  {"42.5 AWG\nSpool", 480, 6270, 10000, 525, 875 },
-  {"44 AWG\nSpool", 400, 18459, 10000, 525, 875 }, //7911
-  {"49 AWG\nSpool", 60, 13326, 10000, 525, 875}
-};
-
-typedef enum { SELECT_MODE, WIND_MODE, CALIBRATE_MODE, PAUSED_MODE } MODE;
-typedef enum  {  STARTING, RUNNING, SHIFT_LEFT, SHIFT_RIGHT, PAUSED, ABORTING, DONE } STATE;
-
-typedef struct
-{
-  const char *description;
-  STATE  next_state;
-} MENU;
-
-#define NUM_PAUSED_MENU 5
-const MENU pauseMenu[NUM_PAUSED_MENU] = {
-  {"Paused...", PAUSED },
-  {"Press\nto resume", RUNNING },
-  {"Shift\nLeft", SHIFT_LEFT },
-  {"Shift\nRight", SHIFT_RIGHT },
-  {"Press\nto abort", DONE }
-};
-
-
-STATE state = STARTING;
-MODE mode = SELECT_MODE;
-
-
-
-unsigned calibrate_position = MID_SWEEP;
-
-unsigned program = 1;     // Which program is selected
-unsigned menu_item = 0;   // Which menu item is selected (for paused menu)
+int8_t menu_item = 0;   // Which menu item is selected (for paused menu)
+int8_t max_menu_item = 0;
+unsigned program = 0;     // Which program is selected
 unsigned wind_count = 0;
 unsigned layer_count = 0;
-boolean isPaused = false;
+unsigned layer_wind_count = 0;
+boolean servo_direction = true;
+boolean displayChanged = true;
+boolean dataChanged = false;
+
+HW_CONFIG config = { 2, 24, 1 };
+#define CONFIG_ADDR   0   // Offset of configuration data in EEPROM
+#define COILDATA_ADDR 64  // Offset of coil program data in EEPROM
+
+STEPPER_DRIVER *stepper = NULL;
+/*
+  uint16_t  inner_diameter; (mm x 10 for display only)
+  uint16_t  width_mm; (mm x 10 for display only)
+  uint16_t  wire_type; (AWG x 10 for display only)
+  uint16_t  ohms; (for display only)
+  uint16_t  spindle_rpm;
+  uint16_t  num_winds; (total winds)
+  uint16_t  winds_per_layer;
+  uint16_t  servo_left_pos; (servo position in us at leftmost extent)
+  uint16_t  width_us; (added to servo_left_pos to determine rightmost extent)
+*/
+COIL_DATA coilData[] = {
+  { 30, 20, 480, 75, 80, 328, 30, 1000, 1000 },
+  { 30, 30, 480, 150, 80, 645, 90, 1200, 600 },
+  { 24, 20, 480, 75, 80, 397, 30, 1000, 1000 },
+  { 30, 30, 425, 40, 50, 554, 90, 1200, 600 },
+  { 30, 30, 440, 50, 63, 396, 90, 1200, 600 },
+  { 30, 30, 440, 150, 53, 1338, 90, 1200, 600 },
+  { 24, 20, 480, 75, 80, 397, 30, 1000, 1000 },
+  { 30, 30, 425, 40, 50, 554, 90, 1200, 600 },
+  { 30, 30, 440, 50, 63, 396, 90, 1200, 600 },
+  { 30, 60, 440, 9999, 150, 10000, 90, 1200, 600 }, 
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+};
+
+STATE state = STARTING;
+MODE mode = MAIN_MODE;
+
+#include "Menus.h"
+
+static uint8_t prevNextCode = 0;
+static uint16_t store=0;
+
+// Read rotary encoder knob direction with debouncing
+// A vald CW or  CCW move returns 1, invalid returns 0.
+int8_t read_rotary() {
+  static int8_t rot_enc_table[] = {0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0};
+
+  prevNextCode <<= 2;
+  if (digitalRead(RE_DATA)) prevNextCode |= 0x02;
+  if (digitalRead(RE_CLK)) prevNextCode |= 0x01;
+  prevNextCode &= 0x0f;
+
+   // If valid then store as 16 bit data.
+   if  (rot_enc_table[prevNextCode] ) {
+      store <<= 4;
+      store |= prevNextCode;
+      if ((store&0xff)==0x2b) return -1;
+      if ((store&0xff)==0x17) return 1;
+   }
+   return 0;
+}
+
+/*
+  Update the display in response to user input
+*/
+void display_menu()
+{
+  //Serial.println( mode );
+  if ( displayChanged && ( menus[mode].items != NULL ) ) {
+    //Serial.println(menus[mode].items[menu_item].description);
+
+    display.clear();
+    if ( ( mode == SELECT_MODE ) && ( coilData[menu_item].inner_diameter != 0 ) ) {
+      COIL_DATA *d = &coilData[menu_item];
+
+      String str1 = String(d->wire_type / 10.0, 1 );
+      display.print( str1.c_str() ); display.print( " AWG " );
+      display.print( d->ohms ); display.print(" ohm"); //display.clearToEOL();
+      display.setCursor( 0, 2 );
+      String str2 = String(d->inner_diameter / 10.0, 1 );
+      display.print( str2.c_str() ); display.print( " mm i.d. x " );
+      String str3 = String(d->width_mm / 10.0, 1 );
+      display.print( str3.c_str() ); display.print( " mm"); //display.clearToEOL();
+    }
+    else {
+      if ( ( mode == MAIN_MODE ) && dataChanged ) {
+        display.print("* ");
+      }
+      display.println(menus[mode].items[menu_item].description);
+    }
+    int val_offset = menus[mode].items[menu_item].value_offset;
+    void *val_ptr = menus[mode].value_ptr;
+    if ( val_ptr && ( val_offset != -1 ) ) {
+      int value = *static_cast<int *>(menus[mode].value_ptr + val_offset);
+      if ( state == RUNNING || state == SHIFT_LEFT || state == SHIFT_RIGHT ) {
+        display.print( "+ " );
+      }
+      display.println( value );
+    }
+    displayChanged = false;
+  }
+  return;
+}
+
+/*
+  Write two fixed lines to the display
+*/
+void display_strings( char *line1, char* line2 )
+{
+  display.clear();
+  display.println( line1 );
+  display.println( line2 );
+}
+
+void set_mode( MODE new_mode, STATE new_state )
+{
+  displayChanged = true;
+  state = new_state;
+  if ( mode != new_mode ) {
+    // Remember last selected program
+    if ( new_mode == SELECT_MODE ) {
+      menu_item = program;
+    }
+    else {
+      menu_item = 0;
+    }
+  }
+  mode = new_mode;
+  //Serial.print("set_mode: "); Serial.print( mode ); Serial.print( " " ); Serial.println( state );
+  max_menu_item = menus[mode].num_items;
+  display_menu();
+}
+// Set specific mode, set state based on current menu selection
+void set_mode( MODE mode )
+{
+  set_mode( mode,
+    menus[mode].items[menu_item].new_state );
+}
+// Set mode and state based on current menu selection
+void set_mode()
+{
+  set_mode( menus[mode].items[menu_item].new_mode,
+    menus[mode].items[menu_item].new_state );
+}
+
+/*
+  Load configuration data and coil data from EEPROM.
+  If the EEPROM has not been initialized yet, use the hardcoded defaults
+*/
+void load_eeprom() {
+  // Uncomment to reset to factory defaults
+  //EEPROM.write( CONFIG_ADDR, 255 );
+  EEPROM.get( CONFIG_ADDR, config );
+  //Serial.println( config.version );
+  // -1 means EEPROM hasn't been initialized, so set defaults
+  if ( config.version == 255 )
+  {
+    config.version = 2;
+    config.steps_per_rev = DEFAULT_MOTOR_STEPS;
+    dataChanged = true;
+  }
+  else {
+    EEPROM.get( COILDATA_ADDR, coilData );
+  }
+}
+
+/*
+  Save hardware configuration and coil program data to EEPROM.
+  Uses 'put' functionality of EEPROM library to only write changed data
+*/
+void save_eeprom() {
+  display_strings( "Saving data", "to EEPROM...");
+  EEPROM.put( CONFIG_ADDR, config );
+  EEPROM.put( COILDATA_ADDR, coilData );
+  delay( 1000 );
+  void(* resetFunc) (void) = 0;
+  resetFunc();
+}
 
 void setup() {
-  unsigned button_press = 0;
-
+  load_eeprom();
   // Setup Stepper motor driver
-  stepper.setEnableActiveState(LOW);
-  stepper.disable();
-  stepper.setSpeedProfile( stepper.CONSTANT_SPEED, 1, 1 ) ;
-  stepper.begin(coilPrograms[program].spindle_rpm, MICROSTEPS);
+  stepper = new STEPPER_DRIVER(config.steps_per_rev, DIR, STEP );
+  stepper->setEnableActiveState(LOW);
+  stepper->disable();
+  stepper->setSpeedProfile( stepper->CONSTANT_SPEED, 1, 1 ) ;
+  stepper->begin(80, MICROSTEPS);
   
+  // Setup Serial port for debugging
   Serial.begin(115200);
   Serial.println("RESET");
 
-  // Setup OLED display
-  // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
-  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    for (;;); // Don't proceed, loop forever
-  }
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("CoilWinder"); display.println(VERSION);
-  display.display();
+  // Setup display
+  Wire.begin();
+  Wire.setClock(400000L);
+  display.begin(&Adafruit128x32, SCREEN_ADDRESS);
+  display.setFont(Arial14);
+  display.set1X();
+  display.clear();
+  display_strings( "CoilWinder", VERSION );
 
   // Setup rotary encoder
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(FOOTSW_PIN, INPUT_PULLUP);
   pinMode(RE_CLK, INPUT);
-  pinMode(RE_DT, INPUT);
-  lastStateCLK = digitalRead(RE_CLK);
-  attachInterrupt(0, updateEncoder, CHANGE );
-  attachInterrupt(1, updateEncoder, CHANGE );
+  pinMode(RE_CLK, INPUT_PULLUP);
+  pinMode(RE_DATA, INPUT);
+  pinMode(RE_DATA, INPUT_PULLUP);
 
-  // Setup servo
-  // The asyncServoLib normalizes the input position to an actual set of pulse widths.
-  asyncServo.SetInput( MIN_SWEEP, MID_SWEEP, MAX_SWEEP);     // Max Left, center, and max right extents in coilPrograms
-  asyncServo.SetOutput(MIN_SERVO, MID_SERVO, MAX_SERVO);     // Actual left, center, and right pulse widths in us that are sent to servo
-  asyncServo.write(coilPrograms[program].sweep_left);
-  asyncServo.Attach(SERVO_PIN);
+  // Setup servo to home position
+  servo.writeMicroseconds( coilData[program].servo_left_pos );
+  servo.attach(SERVO_PIN);
   delay(2000);
-  //asyncServo.Detach();
 
   // Initialize the state machine
-  mode = SELECT_MODE;
-  state = STARTING;
+  set_mode( MAIN_MODE, STARTING );
 }
-
-/*
-  Interrupt routine that handles rotation of the rotary encoder
-*/
-void updateEncoder() {
-  // Read the current state of RE_CLK
-  currentStateCLK = digitalRead(RE_CLK);
-
-  // If last and current state of CLK are different, then pulse occurred
-  // React to only 1 state change to avoid double count
-  if (currentStateCLK != lastStateCLK  && currentStateCLK == 1){
-
-    switch (mode )
-    {
-      case PAUSED_MODE:
-        // If the DT state is the same as the CLK state then
-        // the encoder is rotating CCW so decrement
-        if (digitalRead(RE_DT) == currentStateCLK) {
-          if ( menu_item == 0 ) {
-            menu_item = NUM_PAUSED_MENU;
-          }
-          menu_item --;
-        } else {
-        // Encoder is rotating CW so increment
-          menu_item ++;
-          if ( menu_item >= NUM_PAUSED_MENU ) {
-            menu_item = 0;
-          }
-        }
-        break;
-      case SELECT_MODE:
-        // If the DT state is the same as the CLK state then
-        // the encoder is rotating CCW so decrement
-        if (digitalRead(RE_DT) == currentStateCLK) {
-          if ( program == 0 ) {
-            program = NUM_PROG;
-          }
-          program --;
-        } else {
-        // Encoder is rotating CW so increment
-          program ++;
-          if ( program >= NUM_PROG ) {
-            program = 0;
-          }
-        }
-        case CALIBRATE_MODE:
-        // If the DT state is the same as the CLK state then
-        // the encoder is rotating CCW so decrement
-        if (digitalRead(RE_DT) == currentStateCLK) {
-          if ( calibrate_position == 0 ) {
-            calibrate_position = MAX_SWEEP;
-          }
-          else {
-            calibrate_position --;
-          }
-        } else {
-        // Encoder is rotating CW so increment
-          calibrate_position ++;
-          if ( calibrate_position >= MAX_SWEEP ) {
-            calibrate_position = 0;
-          }
-        }
-        break;
-    }
-  }
-
-  // Remember last CLK state
-  lastStateCLK = currentStateCLK;
-}
-
-/*
-  This routine is called by the AsyncServoLib when the guiding eye hits the left extent.  It tells the asyncServo object
-  to start moving towards the right extent
-*/
-void guidingEye_at_left()
-{
-  //Serial.print("Left: " );
-  //Serial.println(layer_count);
-  layer_count++;
-  asyncServo.Move(coilPrograms[program].sweep_right, coilPrograms[program].sweep_time, guidingEye_at_right );
-
-}
-
-/*
-  This routine is called by the AsyncServoLib when the guding eye hits the right extent.  It tells the asyncServo object
-  to start moving towards the left extent
-*/
-void guidingEye_at_right()
-{
-  //Serial.println("Right");
-  layer_count++;
-  asyncServo.Move(coilPrograms[program].sweep_left, coilPrograms[program].sweep_time, guidingEye_at_left );
-}
-
-boolean buttonActive = false;
-
 
 /*
   Wind mode processing loop.  This loop is a state machine that handles different states during a coil wind, including
@@ -288,250 +294,358 @@ boolean buttonActive = false;
 
   Transitions to PAUSE_MODE when the button is pressed, or SELECT_MODE when the coil wind is done
 */
-void wind_loop() {
+void wind_loop( boolean buttonClicked ) {
   unsigned wait_time_micros;
+  static int last_servo_pos;
 
-  if ( digitalRead( BUTTON_PIN ) == LOW ) {
-     buttonActive = true;
-  }
-  else {
-    if ( buttonActive ) {
-      asyncServo.Pause();
-      mode = PAUSED_MODE;
-      isPaused = true;
-      buttonActive = false;
-      return;
-      //GOTO PAUSE MENU
-    }
+
+  if ( buttonClicked )  {
+    //Serial.println( "Wind button clicked");
+    state = PAUSED;
   }
 
   switch ( state ) {
+    case DONE:
+      Serial.println("DONE");
+      stepper->disable();
+      servo.writeMicroseconds( coilData[program].servo_left_pos );
+      display_strings("Done!","");
+      delay(3000);
+      set_mode( SELECT_MODE, STARTING );
+      break;
     case PAUSED:
-      isPaused = true;
-      mode = PAUSED_MODE;
-      display.clearDisplay();
-      display.setCursor(0, 0);
-      display.println("Paused");
-      display.println(wind_count);
-      display.display();
+      //Serial.println("PAUSED");
+      set_mode( PAUSED_MODE, STARTING );
       break;
     case SHIFT_LEFT:
-      coilPrograms[program].sweep_left -= 5;
-      coilPrograms[program].sweep_right -= 5;
+      coilData[program].servo_left_pos -= 5;
       state = RUNNING;
       break;
     case SHIFT_RIGHT:
-      coilPrograms[program].sweep_left += 5;
-      coilPrograms[program].sweep_right +=5 ;
+      coilData[program].servo_left_pos += 5;
       state = RUNNING;
       break;
     case STARTING:
-      wind_count = coilPrograms[program].num_winds;
-      display.clearDisplay();
-      display.setCursor(0, 0);
-      display.println("Starting");
-      display.println(wind_count);
-      display.display();
-      Serial.println("START");
-      asyncServo.write(coilPrograms[program].sweep_left);
-      asyncServo.Attach(SERVO_PIN);
-      stepper.begin(coilPrograms[program].spindle_rpm, MICROSTEPS);
-      stepper.enable();
-      guidingEye_at_left();
-      stepper.startRotate(360);
+      //Serial.println("STARTING");
+      //wind_count = coilPrograms[program].num_winds;
+      wind_count = coilData[program].num_winds;
+      layer_wind_count = coilData[program].winds_per_layer;
+      layer_count = 1;
+      servo_direction = true;
+      display.clear();
+      display.println("Starting wind");
+      display.print("Remaining: "); display.println(wind_count);
+      //Serial.println("START");
+      last_servo_pos = coilData[program].servo_left_pos;
+      servo.writeMicroseconds( last_servo_pos );
+      stepper->begin(coilData[program].spindle_rpm, MICROSTEPS);
+      stepper->enable();
+      stepper->startRotate(360);
       state = RUNNING;
       break;
     case RUNNING:
-      if ( isPaused == true ) {
-        asyncServo.Resume();
-        isPaused = false;
-      }
-      wait_time_micros = stepper.nextAction();
+      //Serial.println("RUNNING");
+      wait_time_micros = stepper->nextAction();
       if (wait_time_micros <= 0) {
-        stepper.startRotate( 360 );
+        // We have completed a wind
         wind_count--;
-        //Serial.print("Layer: ");
-        //Serial.print(layer_count);
-        //Serial.print(" Wind: ");
-        //Serial.println(wind_count);
-        display.clearDisplay();
-        display.setCursor(0, 0);
-        display.println(wind_count);
-        display.display();
+        layer_wind_count--;
+        display.setCursor(0,0);
+        display.print("Layer: "); display.print( layer_count ); display.print(" Wind: "); display.print( layer_wind_count ); display.println("    ");
+        display.print("Remaining: "); display.print(wind_count); display.println("     ");
+        if ( wind_count <= 0  ) {
+          state = DONE;
+        }
+        else if ( layer_wind_count <= 0 ) {
+          ++layer_count;
+          layer_wind_count = coilData[program].winds_per_layer;
+          if ( servo_direction ) {
+            servo_direction = false;
+          }
+          else {
+            servo_direction = true;
+          }
+        }
+        stepper->startRotate( 360 );
       }
-      if ( isPaused == true ) {
-        asyncServo.Resume();
-        isPaused = false;
+      // Calculate servo position based on where we are in the layer
+      float remaining = 0.0;
+      if ( config.smooth_servo ) {
+        // If configured for smooth servo moves, we updating after each step of the spindle motor.  Otherwise, we only
+        // update after a complete spindle revolution
+        remaining = 1 - ( stepper->getStepsRemaining() / static_cast<float>(config.steps_per_rev) );
       }
-      asyncServo.Update();
+      float pos1 = ( coilData[program].winds_per_layer - layer_wind_count + remaining ) / static_cast<float>(coilData[program].winds_per_layer);
+      int servo_pos = last_servo_pos;
+      //Serial.print( coilData[program].winds_per_layer ); Serial.print(" - "); Serial.println( layer_wind_count );
+      //Serial.print( remaining ); Serial.print(" ");
+      if ( servo_direction ) {
+        float pos = static_cast<float>( pos1 * coilData[program].width_us )
+          + coilData[program].servo_left_pos;
+        servo_pos = static_cast<int>(pos);
+      }
+      else {
+        float pos = ( coilData[program].servo_left_pos + coilData[program].width_us ) - 
+          ( pos1 * static_cast<float>(coilData[program].width_us) );
+        servo_pos = static_cast<int>(pos);
+      }
+      // Only update the servo if the position has changed since last iteration
+      if ( servo_pos != last_servo_pos ) {
+        //Serial.println( servo_pos );
+        servo.writeMicroseconds( servo_pos );
+        last_servo_pos = servo_pos;
+      }      
+      break;
 
-      if ( wind_count <= 0  ) {
-        state = DONE;
-      }
-      break;
-    case DONE:
-      stepper.disable();
-      asyncServo.Stop();
-      asyncServo.write( coilPrograms[program].sweep_left );
-      Serial.println("Done");
-      display.clearDisplay();
-      display.setCursor(0, 0);
-      display.println("Done!");
-      display.display();
-      delay(5000);
-      state = STARTING;
-      mode = SELECT_MODE;
-      asyncServo.Detach();
-      buttonActive = false;
-      break;
   }
 }
 
 /*
-  Calibrate mode processing loop.  This mode is used to determine the exact values for the left and right extents of the
-  guiding eye to be used as the 'sweep_left' and 'sweep_right' values in the coilPrograms coil program.
-
-  The value on the display is the current servo position in microseconds.
-
-  Clicking the button will stop calibration mode and go back to the main menu.
+  Process events when in hardware setup mode - SETUP_MODE
 */
-void calibrate_loop()
+void setup_loop( boolean buttonClicked, int8_t knob )
 {
-  unsigned wait_time_micros = 0;
+    if ( knob ) {
+      if ( state == RUNNING ) {
+        dataChanged = true;     // Set global flag to warn user that there is unsaved data
+      }
+    }
+    if ( buttonClicked ) {
+      switch ( state ) {
+        // STARTING state means parameters are being selected
+        case STARTING:
+          set_mode();
+          break;
+        // RUNNING state means value is being changed
+        case RUNNING:
+          set_mode( SETUP_MODE, STARTING );
+          break;
+      }
+    };
 
-  if ( digitalRead( BUTTON_PIN ) == LOW ) {
-     buttonActive = true;
+    switch ( state )
+    {
+      // PAUSED state means reset the device
+      case ABORTING:
+        EEPROM.write( CONFIG_ADDR, 255 );
+      case DONE:
+        void(* resetFunc) (void) = 0;
+        resetFunc();
+        break;
+      default:
+        Serial.print( "setup_loop invalid state "); Serial.print( state );
+    }
+    display_menu();
+}
+
+/*
+  Process events when in coil select mode - SELECT_MODE.
+  Used when selecting a coil for winding (state == STARTING) or for editing (state == EDITING)
+*/
+void select_loop( boolean buttonClicked, int8_t knob )
+{
+  if ( knob ) {
+    // When selecting for winding, position the servo at the leftmost extent
+    //if ( state == STARTING ) {
+      // Little hack to not move the servo when 'Return to main' is selected
+      if ( coilData[menu_item].servo_left_pos != 0 ) {
+        servo.writeMicroseconds( coilData[menu_item].servo_left_pos );
+      }
+    //}
   }
-  else {
-    if ( buttonActive ) {
-      asyncServo.Pause();
-      mode = WIND_MODE;
-      state = DONE;
-      buttonActive = false;
+  if ( buttonClicked ) {
+    // If "Return to main" selected, do that
+    //Serial.println("select_loop button clicked");
+    //Serial.print( "Mode is "); Serial.print(mode); Serial.print(" state "); Serial.print( state ); Serial.print( " menu_item "); Serial.println( menu_item );
+    if ( coilMenu[menu_item].new_mode == MAIN_MODE ) {
+      set_mode();
       return;
-      //GOTO WIND_MODE and stop the program
+    }
+    // Otherwise, wind or edit
+    program = menu_item;
+    //Serial.print( "State is "); Serial.println( state );
+    switch ( state )
+    {
+      // State when selecting for a wind
+      case STARTING:
+        set_mode( WIND_MODE, STARTING );
+        break;
+      // State when selecting for an edit
+      case EDITING:
+        menus[EDIT_MODE].value_ptr = &coilData[program];
+        set_mode( EDIT_MODE, STARTING );
+        break;
+      default:
+        Serial.print( "select_loop invalid state "); Serial.print( state );
     }
   }
-  switch ( state )
-  {
-    case STARTING:
-      display.clearDisplay();
-      display.setCursor(0, 0);
-      display.println("Calibrating.....");
-      display.display();
-      Serial.println("START Calibrate");
-      delay(1000);
-      asyncServo.write(0);
-      asyncServo.Attach(SERVO_PIN);
-      //stepper.begin(coilPrograms[program].spindle_rpm, MICROSTEPS);
-      //stepper.enable();
-      //guidingEye_at_left();
-      //stepper.startRotate(360);
-      state = RUNNING;
-      break;
-    case RUNNING:
-      //wait_time_micros = stepper.nextAction();
-      //if (wait_time_micros <= 0) {
-      //  stepper.startRotate( 360 );
-      //}
-      asyncServo.write( calibrate_position );
-      display.clearDisplay();
-      display.setCursor(0, 0);
-      display.println(asyncServo.GetCurrentPosition());
-      display.display();
-      //if ( old_state == PAUSED || old_state == ABORTING ) {
-      //  asyncServo.Resume();
-      //}
-      //asyncServo.Update();
-      break;
-  }
+  display_menu();
 }
 
 /*
-  Main menu processing loop.  Scroll through the programs with the knob, and listen for button press events
-  to select the program and start a wind, or to enter calibration mode to get the values for the guiding eye extents
-
-  Transitions to either WIND_MODE for a coil wind for CALIBRATE_MODE to calibrate the guiding eye extents
+  Process events when editing the parameters of a coil program mode - EDIT_MODE
 */
-void select_loop()
+void edit_loop( boolean buttonClicked, int8_t knob )
 {
-    if ( digitalRead( BUTTON_PIN ) == LOW ) {
-      if ( buttonActive == false ) {
-        buttonActive = true;
-        Serial.println( "Button pressed");
-        //buttonTimer = millis();
-      }
-    }
-    else {
-      if ( buttonActive == true ) {
-        buttonActive = false;
-        Serial.println( "Button released" );
-        if ( program == 0 ) {
-          mode = CALIBRATE_MODE;
+  if ( knob ) {
+    dataChanged = true;   // Value has changed, so set global flag to warn user that there are unsaved changes
+    switch ( state )
+    {
+      // Special states used to adjust the servo left position and servo right position
+      case SHIFT_LEFT:
+        if ( coilData[program].servo_left_pos != 0 ) {
+          servo.writeMicroseconds( coilData[program].servo_left_pos );
         }
-        else {
-          mode = WIND_MODE;
+        break;
+      case SHIFT_RIGHT:
+        if ( coilData[program].servo_left_pos != 0 ) {
+          servo.writeMicroseconds( coilData[program].servo_left_pos + coilData[program].width_us );
         }
-        state = STARTING;
-      }
+        break;
     }
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.println(coilPrograms[program].description);
-    asyncServo.write(coilPrograms[program].sweep_left);
-    display.display();
+  }
+
+  if ( buttonClicked ) {
+    // If "Return to main" selected, do that
+    //Serial.println("edit_loop button clicked");
+    //Serial.print( "Mode is "); Serial.print(mode); Serial.print(" state "); Serial.print( state ); Serial.print( " menu_item "); Serial.println( menu_item );
+    switch ( state )
+    {
+      case SHIFT_LEFT:
+      case SHIFT_RIGHT:
+      case RUNNING:
+        set_mode( EDIT_MODE, STARTING );
+        break;
+      case STARTING:
+        //Serial.println("edit_loop STARTING");
+        set_mode();
+        if ( ( state == SHIFT_LEFT ) && ( coilData[program].servo_left_pos != 0 ) ) {
+          servo.writeMicroseconds( coilData[program].servo_left_pos );
+        }
+        else if ( ( state == SHIFT_RIGHT ) && ( coilData[program].servo_left_pos != 0 )  ){
+          servo.writeMicroseconds( coilData[program].servo_left_pos + coilData[program].width_us );
+        }
+        break;
+    };
+  }
+  display_menu();
 }
 
-/*
-  Puased menu processing.  Scroll through the paused menu options, and check for button presses.
-  The paused menu is invoked when you click the button during a winding program, and lets you either abort the
-  wind, or slide the guiding eye extents left or right if your widing form is not correctly aligned to the guiding eye.
-
-  Transitions back to WIND_MODE after a button click.
-*/
-void paused_loop()
+#define DEBOUNCE_DELAY  50
+bool buttonPressed()
 {
-    if ( digitalRead( BUTTON_PIN ) == LOW ) {
-      if ( buttonActive == false ) {
-        buttonActive = true;
-        Serial.println( "Button pressed");
-        //buttonTimer = millis();
+  static bool buttonState = false;
+  static int lastButtonState = LOW;
+  static unsigned long lastDebounceTime = millis();
+  bool ret = false;
+
+  int reading = digitalRead( BUTTON_PIN );
+  if ( reading != LOW ) {
+    reading = digitalRead(FOOTSW_PIN);
+  }
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+  lastButtonState = reading;
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    if (reading != buttonState) {
+      if ( buttonState ) {
+        buttonState = false;
+        ret = true;
+      }
+      else {
+        buttonState = true;
       }
     }
-    else {
-      if ( buttonActive == true ) {
-        buttonActive = false;
-        Serial.println( "Button released" );
-        state = pauseMenu[menu_item].next_state;
-        mode = WIND_MODE;
-        menu_item = 0;
-      }
-    }
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.println(pauseMenu[menu_item].description);
-    display.display();
+  }
+  return ret;
 }
 
 void loop()
 {
+    boolean buttonClicked = false;
+    static boolean knobTurned = false;
+    int8_t knob=0;
+
+    // Read rotary encoder state
+    if( knob=read_rotary() ) {
+      //c +=val;
+      switch ( state )
+      {
+        // These states are used when scrolling through menu items
+        case STARTING:
+        case EDITING:
+          //Serial.print( mode ); Serial.print( " " ); Serial.print( menu_item ); Serial.print( " " ); Serial.println( max_menu_item );
+          menu_item = menu_item + knob;
+          if ( menu_item >= max_menu_item ) {
+            menu_item = 0;
+          }
+          if ( menu_item < 0 ) {
+            menu_item = max_menu_item - 1;
+          }
+          displayChanged = true;
+          break;
+        // These states are used when editing a parameter value.  value_ptr points to a structure or variable that contains the parameter
+        // being edited, and val_offset is the offset location in the structure for the parameter (or 0 for a variable)
+        // The SHIFT_LEFT and SHIFT_RIGHT states are special, used for adjusting the servo endpoints
+        case RUNNING:
+        case SHIFT_LEFT:
+        case SHIFT_RIGHT:
+          int val_offset = menus[mode].items[menu_item].value_offset;
+          if ( val_offset != -1 ) {
+            int *valptr = static_cast<int *>(menus[mode].value_ptr + val_offset);
+            *valptr = *valptr + knob;
+            displayChanged = true;
+          }
+          break;
+      }
+    }
+    //Serial.print(knob); Serial.println("");
+    // Read button state
+    buttonClicked = buttonPressed();
+
+  //Serial.println( mode );
   switch ( mode )
   {
-    // Mode when selecting the program
+    // Main menu mode
+    case MAIN_MODE:
+      if ( buttonClicked ) {
+        if ( menus[mode].items[menu_item].new_state == DONE ) {
+          // WRITE TO EEPROM
+          save_eeprom();
+          set_mode( MAIN_MODE, STARTING );
+          break;
+        }
+        else {
+          set_mode();
+        }
+      }
+      display_menu();
+      break;
+    // Mode when selecting the coil program for either winding or editing
     case SELECT_MODE:
-      select_loop();
+      select_loop( buttonClicked, knob );
+      break;
+    // Mode when editing a coil program
+    case EDIT_MODE:
+      edit_loop( buttonClicked, knob );
       break;
     // Mode when paused during a program (invoked by clicking the button)
     case PAUSED_MODE:
-      paused_loop();
+      if ( buttonClicked ) {
+        //Serial.println("PAUSED_MODE clicked");
+        set_mode();
+      }
+      display_menu();
       break;
     // Mode when a coil is being wound
     case WIND_MODE:
-      wind_loop();
+      wind_loop( buttonClicked );
       break;
-    // Mode used by program 0 to calibrate the guiding eye sweep extents
-    case CALIBRATE_MODE:
-      calibrate_loop();
+
+    // Mode when in hardware setup mode
+    case SETUP_MODE:
+      setup_loop( buttonClicked, knob );
       break;
   }
 }
