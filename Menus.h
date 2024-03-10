@@ -16,8 +16,8 @@ const MenuItem coilMenu[] = {
 };
 
 const MenuItem coilEditMenu[] = {
-  {"Coil I.D. (mm x10)", EDIT_MODE, RUNNING, offsetof( COIL_DATA, inner_diameter ) },
-  {"Coil Width (mm x10)", EDIT_MODE, RUNNING, offsetof( COIL_DATA, width_mm ) },
+  {"Coil I.D. (mm x100)", EDIT_MODE, RUNNING, offsetof( COIL_DATA, inner_diameter ) },
+  {"Coil Width (mm x100)", EDIT_MODE, RUNNING, offsetof( COIL_DATA, width_mm ) },
   {"Wire AWG x10", EDIT_MODE, RUNNING, offsetof( COIL_DATA, wire_type ) },
   {"Ohms", EDIT_MODE, RUNNING, offsetof( COIL_DATA, ohms ) },
   {"Spindle RPM", EDIT_MODE, RUNNING, offsetof( COIL_DATA, spindle_rpm ) },
@@ -33,7 +33,7 @@ const MenuItem mainMenu[] = {
   {"Edit Coils", SELECT_MODE, EDITING, -1 },
   {"Save Data", MAIN_MODE, DONE, -1 },
   {"Hardware Setup", SETUP_MODE, STARTING, -1 },
-  {"Reboot", SETUP_MODE, DONE, -1 }
+  {"Reboot", MAIN_MODE, ABORTING, -1 }
 };
 
 const MenuItem pauseMenu[] = {

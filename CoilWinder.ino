@@ -18,7 +18,7 @@
 #include <Servo.h>
 #include "Types.h"
 
-#define	VERSION	"v2.0-rc1"
+#define	VERSION	"v2.0.0"
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 32 // OLED display height, in pixels
@@ -77,8 +77,8 @@ HW_CONFIG config = { 2, 24, 1 };
 
 STEPPER_DRIVER *stepper = NULL;
 /*
-  uint16_t  inner_diameter; (mm x 10 for display only)
-  uint16_t  width_mm; (mm x 10 for display only)
+  uint16_t  inner_diameter; (mm x 100 for display only)
+  uint16_t  width_mm; (mm x 100 for display only)
   uint16_t  wire_type; (AWG x 10 for display only)
   uint16_t  ohms; (for display only)
   uint16_t  spindle_rpm;
@@ -88,16 +88,16 @@ STEPPER_DRIVER *stepper = NULL;
   uint16_t  width_us; (added to servo_left_pos to determine rightmost extent)
 */
 COIL_DATA coilData[] = {
-  { 30, 20, 480, 75, 80, 328, 30, 1000, 1000 },
-  { 30, 30, 480, 150, 80, 645, 90, 1200, 600 },
-  { 24, 20, 480, 75, 80, 397, 30, 1000, 1000 },
-  { 30, 30, 425, 40, 50, 554, 90, 1200, 600 },
-  { 30, 30, 440, 50, 63, 396, 90, 1200, 600 },
-  { 30, 30, 440, 150, 53, 1338, 90, 1200, 600 },
-  { 24, 20, 480, 75, 80, 397, 30, 1000, 1000 },
-  { 30, 30, 425, 40, 50, 554, 90, 1200, 600 },
-  { 30, 30, 440, 50, 63, 396, 90, 1200, 600 },
-  { 30, 60, 440, 9999, 150, 10000, 90, 1200, 600 }, 
+  { 300, 200, 480, 75, 80, 328, 30, 1000, 1000 },
+  { 300, 300, 480, 150, 80, 645, 90, 1200, 600 },
+  { 240, 200, 480, 75, 80, 397, 30, 1000, 1000 },
+  { 300, 300, 425, 40, 50, 554, 90, 1200, 600 },
+  { 300, 300, 440, 50, 63, 396, 90, 1200, 600 },
+  { 300, 300, 440, 150, 53, 1338, 90, 1200, 600 },
+  { 240, 200, 480, 75, 80, 397, 30, 1000, 1000 },
+  { 300, 300, 425, 40, 50, 554, 90, 1200, 600 },
+  { 300, 300, 440, 50, 63, 396, 90, 1200, 600 },
+  { 300, 600, 440, 9999, 150, 10000, 90, 1200, 600 }, 
   { 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
 
@@ -108,11 +108,15 @@ MODE mode = MAIN_MODE;
 
 static uint8_t prevNextCode = 0;
 static uint16_t store=0;
+#define FAST_ROTATE 60
 
 // Read rotary encoder knob direction with debouncing
 // A vald CW or  CCW move returns 1, invalid returns 0.
 int8_t read_rotary() {
   static int8_t rot_enc_table[] = {0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0};
+  static unsigned long last_move = 0;
+  static int8_t last_dir = 0;
+  int8_t ret = 0;
 
   prevNextCode <<= 2;
   if (digitalRead(RE_DATA)) prevNextCode |= 0x02;
@@ -123,10 +127,28 @@ int8_t read_rotary() {
    if  (rot_enc_table[prevNextCode] ) {
       store <<= 4;
       store |= prevNextCode;
-      if ((store&0xff)==0x2b) return -1;
-      if ((store&0xff)==0x17) return 1;
+      if ((store&0xff)==0x2b) {
+        ret = -1;
+      }
+      else if ((store&0xff)==0x17) {
+        ret = 1;
+      }
    }
-   return 0;
+   if ( ret != 0 ) {
+    int8_t mult = 1;
+    unsigned long now = millis();
+    if ( last_dir == ret ) {
+      if ( ( now - last_move ) < FAST_ROTATE ) {
+        mult = 10;
+        //Serial.println( now - last_move );
+      }
+
+    }
+    last_move = now;
+    last_dir = ret;
+    ret = ret * mult;
+   }
+   return ret;
 }
 
 /*
@@ -146,9 +168,9 @@ void display_menu()
       display.print( str1.c_str() ); display.print( " AWG " );
       display.print( d->ohms ); display.print(" ohm"); //display.clearToEOL();
       display.setCursor( 0, 2 );
-      String str2 = String(d->inner_diameter / 10.0, 1 );
+      String str2 = String(d->inner_diameter / 100.0, 2 );
       display.print( str2.c_str() ); display.print( " mm i.d. x " );
-      String str3 = String(d->width_mm / 10.0, 1 );
+      String str3 = String(d->width_mm / 100.0, 2 );
       display.print( str3.c_str() ); display.print( " mm"); //display.clearToEOL();
     }
     else {
@@ -428,12 +450,9 @@ void setup_loop( boolean buttonClicked, int8_t knob )
       // PAUSED state means reset the device
       case ABORTING:
         EEPROM.write( CONFIG_ADDR, 255 );
-      case DONE:
         void(* resetFunc) (void) = 0;
         resetFunc();
         break;
-      default:
-        Serial.print( "setup_loop invalid state "); Serial.print( state );
     }
     display_menu();
 }
@@ -615,6 +634,10 @@ void loop()
           save_eeprom();
           set_mode( MAIN_MODE, STARTING );
           break;
+        }
+        else if ( menus[mode].items[menu_item].new_state == ABORTING ) {
+          void(* resetFunc) (void) = 0;
+          resetFunc();
         }
         else {
           set_mode();

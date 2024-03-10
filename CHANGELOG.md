@@ -21,18 +21,18 @@ EEPROM to permanently save changes.
   to help align to the coil former
 
 ### Changed
-- Changed parameters of coil programs.  They are now:
-* Coil Inner Diameter in mm x 10 (for display only)
-* Coil Width in mm x 10 (for display only)
-* Wire AWG x 10 (for display only)
-* Coil Ohms (for display only)
-* Spindle RPM
-* Total number of winds
-* Winds per layer
-* Servo left position in us
-* Servo width in us (this is added to Servo left position to determine rightmost servo position)
-- Switched to SSD1306Ascii library to save memory
-- Better debouncing of rotary encoder movements
+* Changed parameters of coil programs.  They are now:
+** Coil Inner Diameter in mm x 10 (for display only)
+** Coil Width in mm x 10 (for display only)
+** Wire AWG x 10 (for display only)
+** Coil Ohms (for display only)
+** Spindle RPM
+** Total number of winds
+** Winds per layer
+** Servo left position in us
+** Servo width in us (this is added to Servo left position to determine rightmost servo position)
+* Switched to SSD1306Ascii library to save memory
+* Better debouncing of rotary encoder movements and detection of fast moves to increment/decrement editable values by 10
 
 ## v1.1.0
 
