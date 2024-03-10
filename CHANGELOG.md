@@ -31,7 +31,12 @@ EEPROM to permanently save changes.
   - Winds per layer
   - Servo left position in us
   - Servo width in us (this is added to Servo left position to determine rightmost servo position)
-- Switched to SSD1306Ascii library to save memory
+- When winding a coil, displays layer number and remaining winds per layer and total remaining winds
+- Pause menu changes during winding:
+  - A paused wind is resumed by clicking again without having to scroll
+  - Remaining winds are displayed when paused
+- Switched to SSD1306Ascii library to conserve device memory
+- Removed AsyncServoLib custom library dependency
 - Better debouncing of rotary encoder movements and detection of fast moves to increment/decrement editable values by 10
 
 ## v1.1.0
