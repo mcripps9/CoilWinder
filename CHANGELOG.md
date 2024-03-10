@@ -7,32 +7,32 @@ in-device editing of coil parameters and hardware settings, and use of
 EEPROM to permanently save changes.
 
 ### Added
-- New menu system including Edit Coils menu to edit coil programs,
-  Hardware Setup menu to configure stepper motor and servo behavior
+- New menu system including Edit Coils menu to edit coil programs
+  and Hardware Setup menu to configure stepper motor and servo behavior
 - Menu based editing of individual coil programs within the device without
   needing to re-upload the software from the Arduino IDE
 - Saving of configuration and coil program data to EEPROM for
   persistent storage.  And asterisk (*) on the main menu alerts you that
   there is changed data that needs saving
-- Reset all data option
+- Reset all data and Reboot device menu settings
 - Support for a second pushbutton or footswitch connected to digital pin 12
   as an alternative to the rotary encoder button.  Either can be used.
 - Servo moves when selecting coil programs or when editing servo endpoints
   to help align to the coil former
 
 ### Changed
-* Changed parameters of coil programs.  They are now:
-** Coil Inner Diameter in mm x 10 (for display only)
-** Coil Width in mm x 10 (for display only)
-** Wire AWG x 10 (for display only)
-** Coil Ohms (for display only)
-** Spindle RPM
-** Total number of winds
-** Winds per layer
-** Servo left position in us
-** Servo width in us (this is added to Servo left position to determine rightmost servo position)
-* Switched to SSD1306Ascii library to save memory
-* Better debouncing of rotary encoder movements and detection of fast moves to increment/decrement editable values by 10
+- Changed parameters of coil programs.  They are now:
+  -  Coil Inner Diameter in mm x 10 (for display only)
+  - Coil Width in mm x 10 (for display only)
+  - Wire AWG x 10 (for display only)
+  - Coil Ohms (for display only)
+  - Spindle RPM
+  - Total number of winds
+  - Winds per layer
+  - Servo left position in us
+  - Servo width in us (this is added to Servo left position to determine rightmost servo position)
+- Switched to SSD1306Ascii library to save memory
+- Better debouncing of rotary encoder movements and detection of fast moves to increment/decrement editable values by 10
 
 ## v1.1.0
 
