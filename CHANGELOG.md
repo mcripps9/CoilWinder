@@ -22,8 +22,8 @@ EEPROM to permanently save changes.
 
 ### Changed
 - Changed parameters of coil programs.  They are now:
-  -  Coil Inner Diameter in mm x 10 (for display only)
-  - Coil Width in mm x 10 (for display only)
+  - Coil Inner Diameter in mm x 100 (for display only)
+  - Coil Width in mm x 100 (for display only)
   - Wire AWG x 10 (for display only)
   - Coil Ohms (for display only)
   - Spindle RPM
